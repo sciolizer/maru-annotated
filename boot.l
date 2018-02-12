@@ -1,8 +1,14 @@
+; raw-lambda (no destructuring of the arguments) implicitly creates a list
+; so this def just gives it a name
 (define list (lambda args args))
 
+; print and dump are (understandably) primitives.
+; They will be redefined below to loop over an obj and print its parts.
+; Not sure why this redef is necessary since the primitive already does that.
 (define %print print)
 (define %dump  dump)
 
+; same as error below, but aborts immediately if printing an arg errors
 (define %error
   (lambda args
     (set error abort)
@@ -11,6 +17,8 @@
     (%print "\n")
     (abort)))
 
+; print args and abort.
+; if an error occurs while printing the args, fallback to %error
 (define error
   (lambda args
     (set error %error)
@@ -27,6 +35,7 @@
 (define cdddr (lambda (x) (cdr (cdr (cdr x)))))
 (define cadddr (lambda (x) (car (cdr (cdr (cdr x))))))
 
+; k -> [(k,v)] -> v. returns () if nothing found
 (define assq
   (lambda (object list)
     (let ((result ()))
@@ -66,8 +75,10 @@
   (lambda (x y)
     (string->symbol (concat-string (symbol->string x) (symbol->string y)))))
 
+; the reader expands ` into the symbol quasiquote. Definining quasiquote here means ` can be used henceforth.
+; (see very next definition define-form)
 (define quasiquote
-  (form
+  (form ; Form is a built-in type with one slot "function". Here, qq-object is assigned to the function slot of a new form.
     (let ((qq-list) (qq-element) (qq-object))
       (set qq-list (lambda (l)
 		     (if (pair? l)
@@ -117,16 +128,19 @@
       (let ((head (function (car list))))
 	(cons head (map function (cdr list))))))
 
+; (a -> z -> b) -> [a] -> z -> [b]. Used by emit.l for traversing instructions in a visitor pattern. z is the compiler.
 (define-function map-with (function list a)
   (if (pair? list)
       (let ((head (function (car list) a)))
 	(cons head (map-with function (cdr list) a)))))
 
+; (a -> b -> z -> c) -> [a] -> [b] -> z -> [c].
 (define-function map2-with (function alist blist a)
   (if (pair? alist)
       (let ((head (function (car alist) (car blist) a)))
 	(cons head (map2-with function (cdr alist) (cdr blist) a)))))
 
+; first three are never used?
 (define-form define-expand (type args . body)	`(set-array-at *expanders*   ,type (lambda ,args ,@body)))
 (define-form define-encode (type args . body)	`(set-array-at *encoders*    ,type (lambda ,args ,@body)))
 (define-form define-eval   (type args . body)	`(set-array-at *evaluators*  ,type (lambda ,args ,@body)))
@@ -234,6 +248,8 @@
 
 (define-selector add-method)
 
+; first echo of "Open, Extensible Object models" - selectors are themselves objects that have an add-method method
+; this is of course just bootstrapping; most of Maru uses define-method instead of calling this directly
 (<selector>-add-method add-method <selector>
   (lambda (self type args body)
     (<selector>-add-method self (eval type) (eval `(lambda ,args ,@body)))))
@@ -309,6 +325,7 @@
       (print arg))
     found))
 
+; magic; not referenced by the maru code; I guess this symbol is treated specially by the c code? todo
 (define *backtrace*
   (lambda (stack depth)
     (let ((posn (array)))

@@ -239,6 +239,20 @@
 
 ;;; ----------------------------------------------------------------
 
+; oh man, this just got real.
+; I think I'm finally starting to get it.
+; When (compile-end) is reached, maru will traverse its own environment, and dump its top-level
+; definitions into assembly (eval.s). Here, (extern) merely produces a tiny wrapper (of type <extern>) around
+; the symbol (e.g. 'strlen), but when this definition is compiled by emit.l into assembly, it will output
+;   _strlen_24stub:
+; 	.indirect_symbol _strlen
+; 	.long 0
+; 	.text
+; 	.data
+; 	.globl _gc__gcollect
+; so the object file produced by the assembly can be linked with the libc primitives. Thus, when Maru generates itself,
+; the copy cannot rely in anyway on the original boot-eval.c. That is why, for instance, subr_print must be redefined below, so
+; that it depends only on externs like 'putc and not on the original implementation.
 (define strlen	(extern 'strlen))
 (define strcmp	(extern 'strcmp))
 (define strdup	(extern 'strdup))
@@ -1216,6 +1230,7 @@
 	       (free buf)
 	       result))))))
 
+; clever. but in maru-2.4 <env> became a type in its own right, so maybe it was too clever?
 (define-function subr_current_environment (args env)
   env)
 

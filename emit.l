@@ -26,6 +26,28 @@
 
 ;;; DEFINE-OPERAND
 
+; "grep define-emit emit.l" to understand the assembly EDSL. Different OPERANDs stringify $1 in different ways, e.g.
+;   (define-emit     (LOAD GI32)             (println "      movl " $1",%eax"))
+;   (define-emit     (LOAD TI32)             (println "      movl " $1",%eax"))
+; ^ these two transform rules look identical, but GI32 stringifies by reading the name slot of $1, while TI32 stringifies
+;   by reading the offset slot of $1 and concatenating "(%esp)"
+
+; afaict, the major operands are:
+;   LABEL - assembler label, e.g.
+;      (LOAD LABEL)        "        movl $___L__9,%eax"
+;      (DEFLABEL LABEL)    "___L__71:"
+;      (GLOBAL LABEL)      "        .globl _define_2Dfsubr"
+;   GI32 - global symbols, e.g.
+;      (LOAD GI32)         "        movl _k__dumpln,%eax"
+;      (STORE GI32)        "        movl %eax,_gc__root__count"
+;      (ADDR GI32)         "        movl $_evaluators,%eax"
+;   TI32 - most common operand, refers to something in the current stack frame (offset of %esp), e.g.
+;      (LOAD TI32)         "        movl 32(%esp),%eax"
+;      (STORE TI32)        "        movl %eax,32(%esp)"
+;      (ADDR TI32)         "        leal 32(%esp),%eax"
+;      (XOR TI32)          "        xorl 24(%esp),%eax"
+;   LI32 - a constant number, e.g.
+;      (LOAD LI32)         "        movl $16,%eax"
 (define-function define-operand-make-setters (tname fields)
   (if (pair? fields)
       (cons `(set (,(concat-symbol (concat-symbol tname '-) (car fields)) self) ,(car fields))
@@ -229,6 +251,7 @@
 					(println "	movl "$2",%eax")
 					(println "	movb %al,(%ecx)"))
 
+; OOP = offset of pointer?
 (define-emit	(OOP-AT TI32)		(println "	movl "$1",%ecx")
 			  		(println "	leal (%eax,%ecx,4),%ecx")
 			  		(println "	movl (%ecx),%eax"))
@@ -240,6 +263,23 @@
 
 ;;; 
 
+; basically model appears to be a stack machine, like in smalltalk or java.
+; the top of the stack is always eax
+; other items in the stack are kept in a portion of the stack frame reserved for "tmp variables" (<TI32>s)
+; the mapping from "the stack" to tmp variables varies throughout the execution of the function, but is fixed for any particular pc
+; see e.g. SET-CHR-AT, generate-ternary, gen-tmp/alloc-temp, and free-temp.
+
+; env (association list of names to (<extern> | <TI32> | <symbol>)s) - the lexical environment
+; param-counter <long> - num bytes in stack frame reserved for input (4 * num-inputs)
+; arg-counter <long> - num bytes in stack frame in use for next call; resets to 0 after each call
+; arg-limit <long> - max value reached by arg-counter for current function
+; tmp-counter <long> - num bytes in stack frame used for temps. never decreases, but stack frame slots can be reused for different <TI32>s
+; tmp-limit <long> - redundant? always equals tmp-counter
+; temps (stack of <TI32>s) - mapping from virtual stack machine to tmp variables
+; epilogue <LABEL> - where to jump to return from function
+; asm (array of emit-ables) - assembly instructions
+; pc <long> - indexer of asm
+; section - unused?
 (define-structure <compiler> (env param-counter arg-counter arg-limit tmp-counter tmp-limit temps epilogue asm pc section))
 
 (define-function compiler (env)
@@ -339,22 +379,22 @@
   (gen comp op))
 
 (define-function generate-unary (op args comp)
-  (gen (car args) comp)
-  (gen comp op))
+  (gen (car args) comp); load arg into eax
+  (gen comp op)); run op
 
 (define-function generate-binary (op args comp)
-  (let ((tmp (gen-tmp (cadr args) comp)))
-    (gen (car  args) comp)
-    (free-temp comp tmp)
-    (gen comp op tmp)))
+  (let ((tmp (gen-tmp (cadr args) comp))); load second arg into tmp var
+    (gen (car  args) comp); load first arg into eax
+    (free-temp comp tmp); push second arg into stack machine (no code gen, just reinterprets tmp variables)
+    (gen comp op tmp))); run op
 
 (define-function generate-ternary (op args comp)
-  (let ((tmp2 (gen-tmp (caddr args) comp))
-	(tmp1 (gen-tmp (cadr  args) comp)))
-    (gen (car  args) comp)
-    (free-temp comp tmp1)
-    (free-temp comp tmp2)
-    (gen comp op tmp1 tmp2)))
+  (let ((tmp2 (gen-tmp (caddr args) comp)); load third arg into tmp var
+	(tmp1 (gen-tmp (cadr  args) comp))); load second arg into tmp var
+    (gen (car  args) comp); load first arg into eax
+    (free-temp comp tmp1); push second arg into stack machine (no code gen, just reinterprets tmp variables)
+    (free-temp comp tmp2); push first arg into stack machine (no code gen, just reinterprets tmp variables)
+    (gen comp op tmp1 tmp2))); run op
 
 (define generators (list->array (list generate-nullary generate-unary generate-binary generate-ternary)))
 

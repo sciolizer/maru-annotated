@@ -9,7 +9,21 @@
 (define-form safe prog ())
 ;;(define-form safe prog `(let () ,@prog))
 
+; Allocated structures in maru are kept in a singly linked circular list of chunks. Each chunk has a <header>, and
+; may or may not contain a structure. When an empty chunk is filled with a new structure, if there is excess unused
+; space in the chunk, the chunk is split and the second half is inserted in the linked list immediately after
+; the first half. At initialization, the linked list is a singleton of a ~64k empty chunk.
+; <header>:
+;   size - number of bytes in the chunk, not including the <header>
+;   flags - see below, starting with <header>-flags-used
+;   next - pointer to the next chunk. The last chunk points back to the first chunk.
+;   type - accessor is unused, but space is reserved so that storing the type at oop -1 will not clobber anything
 (define-structure <header> (size flags next type))
+
+; String buffer.
+;   contents - pointer to malloc'd region, which doubles in size everytime more space is needed
+;   size - number of bytes in malloc'd region; starts out as 32, remains a power of 2 as buffer grows
+;   position - number of characters in buffer
 (define-structure <buffer> (contents size position))
 
 (define-function make-gc-protectors (vars)
@@ -39,6 +53,21 @@
 
 (compile-begin)
 
+; oh man, this just got real.
+; I think I'm finally starting to get it.
+; When (compile-end) is reached, maru will traverse its own environment, and dump its top-level
+; definitions into assembly (eval.s). Here, (extern) merely produces a tiny wrapper (of type <extern>) around
+; the symbol (e.g. 'strlen), but when this definition is compiled by emit.l into assembly, it will output
+
+;	.section __IMPORT,__pointers,non_lazy_symbol_pointers
+;   _strlen_24stub:
+; 	.indirect_symbol _strlen
+; 	.long 0
+; 	.text
+
+; so the object file produced by the assembly can be linked with the libc primitives. Thus, when Maru generates itself,
+; the copy cannot rely in anyway on the original boot-eval.c. That is why, for instance, subr_print must be redefined below, so
+; that it depends only on externs like 'putc and not on the original implementation.
 (define abort	(extern	'abort))
 (define exit	(extern	'exit))
 (define malloc	(extern	'malloc))
@@ -51,27 +80,28 @@
 
 (define stderr			0)
 
-(define gc_quantum		65504)
-(define gc_frequency		65536)
+(define gc_quantum		65504); size to request from OS when need more space; not sure why this is 32 bytes "short"
+(define gc_frequency		65536); pre-emptive collection triggered when gc_alloc_count = this number
 
+; these three stat trackers are for debugging messages only; they are each assigned after every sweep
 (define gc_objects_live		0)
 (define gc_bytes_used		0)
 (define gc_bytes_free		0)
 
-(define gc_roots		0)
-(define gc_root_count		0)
-(define gc_root_max		0)
+(define gc_roots		0); pointer to a malloc'd "array" (not an <array>) where gc roots are kept
+(define gc_root_count		0); size of (C-style) array
+(define gc_root_max		0); supposed to be powers of two (standard realloc pattern for vectors) but I think it's buggy
 
-(define gc_memory_base		0)
-(define gc_memory_last		0)
-(define gc_alloc_count		0)
+(define gc_memory_base		0); pointer to first chunk
+(define gc_memory_last		0); pointer to last allocation block
+(define gc_alloc_count		0); number of allocations since the last garbage collection; can trigger pre-emptive collection if reaches gc_frequency
 (define gc_collection_count	0)
 
 (define-form size-of-structure (type)	(* 4 (array-at %structure-sizes (eval type))))
 
-(define-form <header>-flags-used ()	1)
-(define-form <header>-flags-atom ()	2)
-(define-form <header>-flags-mark ()	4)
+(define-form <header>-flags-used ()	1); whether chunk contains a structure
+(define-form <header>-flags-atom ()	2); an (unused?) optimization, to avoid traversing chunks (in mark phase) that have no children
+(define-form <header>-flags-mark ()	4); set during mark, cleared during sweep
 
 (define-form <header>-flags-used+atom ()	(+ (<header>-flags-used) (<header>-flags-atom)))
 
@@ -113,6 +143,11 @@
     (set gc_memory_base ptr)
     (set gc_memory_last ptr)))
 
+; this might be buggy. 'max 32' means you can never have more than 32 roots at a time
+; but gc_push_root never returns failure. If the max is reached, new roots will continue to be
+; added past the region of allocated memory.
+; there also seems to be another bug: gc_root_max starts out zero. double zero is still zero. So
+; in fact all roots are kept in unallocated memory?
 (define-function gc_push_root (ptr)
   (and (= gc_root_count gc_root_max)
        (let* ((roots (malloc (* 4 (set gc_root_max (max 32 (* 2 gc_root_max)))))))
@@ -138,7 +173,7 @@
 
 (define-function gc_malloc_atomic (size)
   (let* ((obj (gc_malloc size)))
-    (set (<header>-flags (- obj (size-of-structure <header>))) (<header>-flags-used+atom))
+    (set (<header>-flags (- obj (size-of-structure <header>))) (<header>-flags-used+atom)); mark as used and childless
     obj))
 
 (define-function gc_malloc (size)
@@ -151,18 +186,19 @@
       (while
 	(let ()
 	  (debug (printf "alloc? %d %p %p [%p] %d >= %d %d\n" (<header>-flags chunk) chunk (<header>-next chunk) first (<header>-size chunk) size (<= size (<header>-size chunk))))
-	  (if (= 0 (<header>-flags chunk))
+	  (if (= 0 (<header>-flags chunk)); if chunk is empty
 	      (let ((csize (<header>-size chunk)))
+                ; if there are additional empty chunks immediately after this one, and they are adjacent in memory, skip forward to the last of them
 		(while (and (= 0 (<header>-flags (<header>-next chunk)))
 			    (= (<header>-next chunk) (+ chunk (+ (size-of-structure <header>) csize))))
 		  (let ((next (<header>-next chunk)))
 		    (set (<header>-next chunk) (<header>-next next))
 		    (set csize (set (<header>-size chunk) (+ csize (+ (size-of-structure <header>) (<header>-size next)))))
 		    (and (= next gc_memory_last) (set gc_memory_last chunk))))
-		(if (or (< ssize csize) (= size csize))
+		(if (or (< ssize csize) (= size csize)); and if chunk is large enough to hold new structure
 		    (let ()
 		      (debug (printf "csize %d\n" csize))
-		      (and (> csize ssize)
+		      (and (> csize ssize) ; always true??
 			   (let ((split (+ chunk ssize)))
 			     (debug (printf "split %d: %p + %d -> %p + %d\n" csize chunk size split (- csize (+ size (size-of-structure <header>)))))
 			     (set (<header>-size  split) (- csize (+ size (size-of-structure <header>))))
@@ -239,20 +275,6 @@
 
 ;;; ----------------------------------------------------------------
 
-; oh man, this just got real.
-; I think I'm finally starting to get it.
-; When (compile-end) is reached, maru will traverse its own environment, and dump its top-level
-; definitions into assembly (eval.s). Here, (extern) merely produces a tiny wrapper (of type <extern>) around
-; the symbol (e.g. 'strlen), but when this definition is compiled by emit.l into assembly, it will output
-;   _strlen_24stub:
-; 	.indirect_symbol _strlen
-; 	.long 0
-; 	.text
-; 	.data
-; 	.globl _gc__gcollect
-; so the object file produced by the assembly can be linked with the libc primitives. Thus, when Maru generates itself,
-; the copy cannot rely in anyway on the original boot-eval.c. That is why, for instance, subr_print must be redefined below, so
-; that it depends only on externs like 'putc and not on the original implementation.
 (define strlen	(extern 'strlen))
 (define strcmp	(extern 'strcmp))
 (define strdup	(extern 'strdup))
@@ -268,20 +290,22 @@
 
 (define EOF	-1)
 
+; todo: come back and annotate each of these (including the section below, for symbols, globals, etc.
+; for just this section, describe each type's evaluator and applicator
 (define <undefined>	 0)
 (define <long>		 1)
 (define <string>	 2)
 (define <symbol>	 3)
 (define <pair>		 4)
 (define <_array>	 5)
-(define <array>		 6)
+(define <array>		 6); pointer to an _array
 (define <expr>		 7)
 (define <form>		 8)
 (define <fixed>		 9)
 (define <subr>		10)
 
-(define symbols			0)
-(define globals			0)
+(define symbols			0); points to the head of the cons list of (intern'd) <symbol>s
+(define globals			0); points to the head of the association list for the global environment
 (define expanders		0)
 (define encoders		0)
 (define evaluators		0)
@@ -306,6 +330,8 @@
 
 (define opt_verbose		0)
 
+; Even though Ted Kaehler wanted to get rid of idst vtables and replace them with object tables,
+; I guess Piumarta still thinks keeping things at address -1 is a good idea. (I have no opinion myself.)
 (define-function new-bits (type size)
   (let ((obj (gc_malloc_atomic size)))
     (set (oop-at obj -1) type)
@@ -363,6 +389,8 @@
       (set (<form>-function obj) fn)
       obj)))
 
+; some of these gc-protects look like they are unnecessary, and so are maybe here only just to be future proof,
+; e.g. if (set ...) were modified in a way that added an allocation, the protect would be necessary
 (define-function new-<fixed> (fn)
   (let ((obj (new-oops <fixed> (size-of-structure <fixed>))))
     (gc-protect (obj)

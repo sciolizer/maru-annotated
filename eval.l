@@ -295,21 +295,23 @@
 (define <undefined>	 0)
 (define <long>		 1)
 (define <string>	 2)
-(define <symbol>	 3)
-(define <pair>		 4)
+(define <symbol>	 3); subr_eval_symbol "eval-<symbol>" :: Args@(Symbol : Args) -> Env -> a; does environment lookup
+(define <pair>		 4); subr_eval_pair "eval-<pair>" :: Args@(<fixed>|... : Args -> Env -> a; if <fixed>, same as subr_apply_fixed, otherwise evlist and THEN apply
 (define <_array>	 5)
 (define <array>		 6); pointer to an _array
-(define <expr>		 7)
+(define <expr>		 7); actually more like a closure... subr_apply_expr "apply-<expr>"
 (define <form>		 8)
-(define <fixed>		 9)
+(define <fixed>		 9); subr_apply_fixed "apply-<fixed>"; if <subr>, call, else lookup applicator by type and apply applicator
 (define <subr>		10)
 
 (define symbols			0); points to the head of the cons list of (intern'd) <symbol>s
 (define globals			0); points to the head of the association list for the global environment
-(define expanders		0)
+(define expanders		0); pause here
 (define encoders		0)
-(define evaluators		0)
-(define applicators		0)
+
+; I'm really confused about the difference between evaluators and applicators
+(define evaluators		0); a <pair>, head is symbol "*evaluators*", tail is an heterogenous array of <subr>s (List Arg -> Env -> a) and things which can be applied
+(define applicators		0); a <pair>, head is symbol "*applicators*", tail is an heterogenous array of ... it's the same thing? todo this will be easier to describe if I enumerate the evaluators and applicators for each type
 (define s_t			0)
 (define s_dot			0)
 (define s_set			0)
@@ -432,6 +434,7 @@
 
 (define-form get_long (obj)	`(oop-at ,obj 0))
 
+; low-level accessors for <pair>s
 (define-form get_head (obj)	`(oop-at ,obj 0))
 (define-form get_tail (obj)	`(oop-at ,obj 1))
 (define-form set_tail (obj val)	`(set-oop-at ,obj 1 ,val))

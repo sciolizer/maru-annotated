@@ -1,0 +1,13 @@
+; when done, make a table of all of the types, and describe their evaluators and applicators
+; make sure "subr"s are included, e.g. make sure it is clear how (current-environment) is able to work
+; is Maru safe? meaning, is all pointer arithmetic checked? If so, how are <_array> accesses handled?
+; If I read a long from a structure, and then call type-of on that long, how does it know without the type header?
+; where is the "metaobject protocol"? How does emit.l get the src code of each thing in its environment.
+; some other things I would like to try with this codebase:
+; * compile to a fake language, just to see what kind of reductions occur before compilation
+; * compile to a real language, like javascript
+; * implement my idea about containment, so you can get rid of the header, and memory layout is customizable
+; * add a runtime-type system, e.g. (infer-type name-of-function) outputs a type or an error
+; * make a service api for doing auto-completion
+; * create an image format (ala smalltalk) into which programs can be suspended and resumed
+; * implement Kovach's semantics
